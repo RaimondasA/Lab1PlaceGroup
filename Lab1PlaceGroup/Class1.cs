@@ -100,20 +100,7 @@ namespace Lab1PlaceGroup
 
                     Solid intersection = BooleanOperationsUtils.ExecuteBooleanOperation(wall_solids[0], duct_solids[0], BooleanOperationsType.Intersect);
 
-                    
-
-                    var go = intersection.Faces;
-
-                    string pointsString = "";
-
-                    foreach (var item in intersection.Faces)
-                    {
-
-                        pointsString = item + " ";
-                    }
-
-
-                    TaskDialog.Show("Intersection Volume", pointsString);
+                    TaskDialog.Show("Intersection Volume", intersection.Volume.ToString());
                 }
 
             }
