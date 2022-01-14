@@ -12,101 +12,137 @@ using Autodesk.Revit.UI.Selection;
 
 namespace Lab1PlaceGroup
 {
-    [Transaction(TransactionMode.ReadOnly)]
+    [Transaction(TransactionMode.Manual)]
     [Regeneration(RegenerationOption.Manual)]
     public class Class1 : IExternalCommand
     {
-        public class MySelectionFilter : ISelectionFilter
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            Document m_doc = null;
 
-            public bool AllowElement(Element element)
-            {
-                return element is Wall || element is Duct;
-            }
-            public bool AllowReference(Reference refer, XYZ point)
-            {
-                GeometryObject geoObject =
-                m_doc.GetElement(refer)
-                     .GetGeometryObjectFromReference(refer);
-                return geoObject != null && geoObject is Face;
-            }
-        }
-
-        public Result Execute(ExternalCommandData commandData,
-          ref string message, ElementSet elements)
-        {
-            ////Get application and document objects
             UIDocument uidoc = commandData.Application.ActiveUIDocument;
             UIApplication uiapp = commandData.Application;
             Document doc = uiapp.ActiveUIDocument.Document;
 
-            try
+            //Sudedami visi modelio elementai "wall" į sąrašą
+            FilteredElementCollector WallCollector = new FilteredElementCollector(doc);
+            WallCollector.OfClass(typeof(Wall));
+            List<Wall> walls = WallCollector.Cast<Wall>().ToList();
+
+            //Sudedami visi modelio elementai "duct" į sąrašą
+            FilteredElementCollector DuctCollector = new FilteredElementCollector(doc);
+            DuctCollector.OfClass(typeof(Duct));
+            List<Duct> ducts = DuctCollector.Cast<Duct>().ToList();
+
+            foreach (Duct du in ducts)
             {
-                while (true)
+                foreach (Wall wa in walls)
                 {
-                    Reference selRefWall =
-                      uidoc.Selection.PickObject(ObjectType.Element,
-                        new MySelectionFilter(), "select a wall");
+                    //Surandama duct centro linija
+                    Curve ductCurve = FindDuctCurve(du);
 
-                    Wall wall = uidoc.Document.GetElement(selRefWall) as Wall;
+                    //Surandamas wall paviršius
+                    Face wallFace = FindWallFace(wa);
 
-                    Reference selRefDuct =
-                      uidoc.Selection.PickObject(ObjectType.Element,
-                        new MySelectionFilter(), "select a duct");
-
-                    Duct duct = uidoc.Document.GetElement(selRefDuct) as Duct;
-
-                    GeometryElement geomWall = wall.get_Geometry(new Options());
-                    GeometryElement geomDuct = duct.get_Geometry(new Options());
-
-                    List<Solid> wall_solids = new List<Solid>();
-
-                    List<Curve> wall_geo = new List<Curve>();
-
-                    foreach (GeometryObject geomObj in geomWall)
+                    if (wallFace != null)
                     {
-                        Curve geomCurve = geomObj as Curve;
-                        if (null != geomCurve)
-                        {
-                            wall_geo.Add(geomCurve);
-                        }
+                        //Ieškomas wall paviršiaus ir duct linijos susikirtimo taškas
+                        XYZ intersectPoint = FindIntersectPoint(wallFace, ductCurve);
 
-                        Solid geomSolid = geomObj as Solid;
-                        if (null != geomSolid)
+                        if (!intersectPoint.IsAlmostEqualTo(new XYZ(0, 0, 0)))
                         {
-                            wall_solids.Add(geomSolid);
+                            //Surandamas reikiamo elemento simbolis
+                            FamilySymbol symbol = GetFamilySymbolByName(doc, "M_Round Face Opening");
+
+                            //Šiuo atveju turėtų būti surandama elemento kryptis
+                            XYZ refDir1 = intersectPoint.CrossProduct(XYZ.BasisZ);
+
+                            using (Transaction transaction = new Transaction(doc))
+                            {
+                                transaction.Start("LetsDoThis");
+
+                                //Iterpiamas elementas apskaičiuotame wall ir duct susikirtimo taške
+                                FamilyInstance instance = doc.Create.NewFamilyInstance(wallFace, intersectPoint, refDir1, symbol);
+
+                                transaction.Commit();
+                            }
                         }
                     }
-
-                    List<Solid> duct_solids = new List<Solid>();
-
-                    List<Curve> duct_geo = new List<Curve>();
-
-                    foreach (GeometryObject geomObj in geomDuct)
-                    {
-                        Curve geomCurve = geomObj as Curve;
-                        if (null != geomCurve)
-                        {
-                            duct_geo.Add(geomCurve);
-                        }
-
-                        Solid geomSolid = geomObj as Solid;
-                        if (null != geomSolid)
-                        {
-                            duct_solids.Add(geomSolid);
-                        }
-                    }
-
-                    Solid intersection = BooleanOperationsUtils.ExecuteBooleanOperation(wall_solids[0], duct_solids[0], BooleanOperationsType.Intersect);
-
-                    TaskDialog.Show("Intersection Volume", intersection.Volume.ToString());
                 }
-
             }
-            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { }
 
             return Result.Succeeded;
+        }
+
+        public static FamilySymbol GetFamilySymbolByName(Document doc, string name)
+        {
+            var paramId = new ElementId(BuiltInParameter.ALL_MODEL_FAMILY_NAME);
+            var paramValueProvider = new ParameterValueProvider(paramId);
+            var equalsRule = new FilterStringEquals();
+            var filterRule = new FilterStringRule(paramValueProvider, equalsRule, name, false);
+            var filter = new ElementParameterFilter(filterRule);
+
+            var fec = new FilteredElementCollector(doc);
+            fec.OfClass(typeof(FamilySymbol)).WhereElementIsElementType().WherePasses(filter);
+
+            if (fec.GetElementCount() == 1)
+            {
+                var symbol = fec.FirstElement() as FamilySymbol;
+                if (!symbol.IsActive)
+                {
+                    symbol.Activate();
+                    doc.Regenerate();
+                }
+                return symbol;
+            }
+            return null;
+        }
+
+        public static Curve FindDuctCurve(Duct duct)
+        {
+            LocationCurve positionCurve = duct.Location as LocationCurve;
+
+            Curve curve = positionCurve.Curve;
+
+            return curve;
+        }
+
+        public static Face FindWallFace(Wall wall)
+        {
+            Face face = null;
+            Options geomOptions = new Options();
+            geomOptions.ComputeReferences = true;
+
+            GeometryElement wallGeom = wall.get_Geometry(geomOptions);
+            foreach (GeometryObject geomObj in wallGeom)
+            {
+                Solid geomSolid = geomObj as Solid;
+                if (null != geomSolid)
+                {
+                    foreach (Face geomFace in geomSolid.Faces)
+                    {
+                        face = geomFace;
+                        break;
+                    }
+                    break;
+                }
+            }
+
+            return face;
+        }
+
+        public static XYZ FindIntersectPoint(Face wallFace, Curve ductCirve)
+        {
+            IntersectionResultArray results;
+            var inter = wallFace.Intersect(ductCirve, out results);
+            XYZ point = new XYZ(0,0,0);
+
+            if (inter.ToString().Contains("Overlap"))
+            {
+                IntersectionResult iResult = results.get_Item(0);
+                point = iResult.XYZPoint;
+            }
+
+            return point;
         }
     }
 }
